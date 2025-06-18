@@ -57,6 +57,9 @@ python_functions = "test_*"
 addopts = "--cov=app --cov-report=term-missing --cov-fail-under=90"
 asyncio_mode = "auto"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
