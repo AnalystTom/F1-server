@@ -7,7 +7,7 @@ import fastf1.plotting
 
 fastf1.plotting.setup_mpl(misc_mpl_mods=False, color_scheme='fastf1')
 
-session = fastf1.get_session(2025, 'CAN', 'R')
+session = fastf1.get_session(2025, 'ESP', 'R')
 
 session.load()
 fast_leclerc = session.laps.pick_drivers('VER').pick_fastest()
