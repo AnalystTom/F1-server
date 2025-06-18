@@ -1,5 +1,9 @@
 import os
 import asyncio
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 from typing import AsyncGenerator, Optional, List, Dict, Union
 
 from fastapi import FastAPI, HTTPException
@@ -37,6 +41,95 @@ class GeminiAgent:
         # Store the system instruction
         self.system_instruction = system_instruction
 
+    def execute_code(self, code: str) -> Dict[str, str]:
+        """Execute Python code in a sandboxed environment and return stdout/stderr."""
+        try:
+            # Create a temporary file for the code
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                # Add FastF1 cache setup to every execution
+                # Indent the user code properly
+                indented_code = '\n'.join('    ' + line for line in code.split('\n'))
+                full_code = f"""import sys
+import os
+sys.path.insert(0, os.getcwd())
+
+try:
+    import fastf1
+    import pandas as pd
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend
+    import matplotlib.pyplot as plt
+    
+    # Enable FastF1 caching (create directory if it doesn't exist)
+    import os
+    cache_dir = "/tmp/fastf1_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    fastf1.Cache.enable_cache(cache_dir)
+    
+{indented_code}
+    
+except Exception as e:
+    print(f"Error: {{e}}", file=sys.stderr)
+    import traceback
+    traceback.print_exc()
+"""
+                f.write(full_code)
+                f.flush()
+                
+                # Execute the code
+                result = subprocess.run(
+                    [sys.executable, f.name],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,  # 60 second timeout
+                    cwd=os.getcwd()
+                )
+                
+                # Clean up
+                os.unlink(f.name)
+                
+                return {
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "return_code": result.returncode
+                }
+                
+        except subprocess.TimeoutExpired:
+            return {"stdout": "", "stderr": "Code execution timed out", "return_code": 1}
+        except Exception as e:
+            return {"stdout": "", "stderr": f"Execution error: {e}", "return_code": 1}
+
+    def _process_react_response(self, response: str) -> str:
+        """Process ReAct response and execute code blocks marked with <EXECUTE>."""
+        import re
+        
+        # Find code blocks followed by <EXECUTE>
+        code_pattern = r'```python\n(.*?)\n```\s*<EXECUTE>'
+        matches = re.findall(code_pattern, response, re.DOTALL)
+        
+        processed_response = response
+        
+        for code_block in matches:
+            # Execute the code
+            execution_result = self.execute_code(code_block)
+            
+            # Format the execution result
+            result_section = "\n\n### Result\n"
+            if execution_result["stdout"]:
+                result_section += execution_result["stdout"]
+            if execution_result["stderr"]:
+                result_section += f"\nErrors: {execution_result['stderr']}"
+            if execution_result["return_code"] != 0:
+                result_section += f"\nExit code: {execution_result['return_code']}"
+            
+            # Replace <EXECUTE> with the result
+            processed_response = processed_response.replace(
+                f"```python\n{code_block}\n```\n<EXECUTE>",
+                f"```python\n{code_block}\n```\n<EXECUTE>{result_section}"
+            )
+        
+        return processed_response
+
 
     def generate_response(self, query: str) -> str:
         """Return full response (blocking)."""
@@ -57,7 +150,10 @@ class GeminiAgent:
             contents=contents, # Pass the combined contents
             config=gen_config,
         )
-        return getattr(resp, "text", str(resp))
+        response_text = getattr(resp, "text", str(resp))
+        
+        # Process ReAct workflow with code execution
+        return self._process_react_response(response_text)
 
     async def generate_response_stream(self, query: str) -> AsyncGenerator[str, None]:
         """Stream response tokens asynchronously."""
@@ -87,9 +183,61 @@ class GeminiAgent:
             yield token
 
 
-# Instantiate global agent with the desired system instruction
+FASTF1_SYSTEM_INSTRUCTION = """
+You are "FastF1-Agent", an autonomous Python assistant that answers Formula 1 questions by planning, coding, executing, and explaining with the FastF1 library. 
+Your knowledge cutoff isn't limited to 2025. With FastF1 Library you get access to most up to date data by querying it with the fastf1 library. 
+You follow the ReAct pattern to interleave reasoning with actions.
+
+### Required Workflow Template
+For EVERY user request, respond in EXACTLY this order:
+
+### Thought
+1. [Short, numbered reasoning steps]
+2. [Break down the F1 question into sub-tasks]
+
+### Code
+```python
+import fastf1
+import pandas as pd
+import matplotlib.pyplot as plt
+fastf1.Cache.enable_cache("/tmp/fastf1_cache")
+
+# Your FastF1 logic here
+# Use patterns like:
+# session = fastf1.get_session(year, event, session_type)
+# session.load()
+# Print results with print(df.to_string(index=False))
+```
+
+<EXECUTE>
+
+### Result
+[Echo stdout/stderr from execution]
+
+### Answer
+[Natural-language conclusion based on results]
+
+### FastF1 Usage Patterns:
+- Session loading: `fastf1.get_session(2023, "Monaco", "Q")` 
+- Always enable caching: `fastf1.Cache.enable_cache("/tmp/fastf1_cache")`
+- Load data: `session.load()` or selective loading with parameters
+- Driver filtering: `session.laps.pick_drivers('VER')`
+- Fastest laps: `session.laps.pick_fastest()`
+- Output tables: `print(df.to_string(index=False))`
+- Visualizations: Use matplotlib, describe plots as "[Plot generated: description]"
+
+### Safety Rules:
+- Code must be self-contained Python 3.11+ compatible
+- Never fabricate data, only use FastF1 APIs
+- Handle exceptions gracefully
+- Keep tables ≤20 rows for readability
+- Place <EXECUTE> marker after code blocks
+
+Never place the answer before reasoning or code execution.
+"""
+
 _agent = GeminiAgent(
-    system_instruction="You are a helpful assistant who answer questions about F1."
+    system_instruction=FASTF1_SYSTEM_INSTRUCTION
 )
 
 app = FastAPI(
@@ -113,7 +261,7 @@ def health_check():
     return {"status": "ok", "message": "API is operational"}
 
 
-@app.post("/agent", response_model=QueryResponse)
+@app.post("/chat", response_model=QueryResponse)
 def query_agent(request: QueryRequest):
     try:
         answer = _agent.generate_response(request.query)
@@ -122,7 +270,7 @@ def query_agent(request: QueryRequest):
     return QueryResponse(response=answer)
 
 
-@app.post("/agent/stream")
+@app.post("/chat/stream")
 async def query_agent_stream(request: QueryRequest):
     async def event_generator():
         try:
