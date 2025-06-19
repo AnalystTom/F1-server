@@ -17,6 +17,7 @@ dependencies = [
     "matplotlib>=3.7.0",
     "seaborn>=0.12.0",
     "sse_starlette>=1.6.1",
+    "google-genai>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -30,7 +31,7 @@ dev = [
     "mypy>=1.7.0",
     "types-redis>=4.6.0",
     "httpx>=0.25.0",
-    sse_starlette>=1.6.1",
+    "sse_starlette>=1.6.1",
 ]
 
 [project.scripts]
