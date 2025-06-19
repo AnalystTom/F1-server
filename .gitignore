@@ -6,3 +6,4 @@ tests/test_llm.py
 planning/Specs/Initial_spec.md
 gateway/src/mcp_gateway/server.py
 CLAUDE.md
+.github/workflows/deploy.yml
